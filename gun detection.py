@@ -116,7 +116,7 @@ def main():
             # When gun is spotted
             if gun_count > 0:
                 # Console Alert Message with timestamp and gun count
-                print(f"[ALERT] 🚨 {timestamp_str} | THREAT DETECTED: {gun_count} Gun(s) Spotted in feed!")
+                print(f"[ALERT]  {timestamp_str} | THREAT DETECTED: {gun_count} Gun(s) Spotted in feed!")
 
                 # Play Audio Alarm if enabled
                 if not args.no_sound:
@@ -152,7 +152,7 @@ def main():
             # Display Snapshot Saved Notice on Screen
             if current_time < snapshot_saved_notice_until:
                 cv2.rectangle(frame, (10, 50), (320, 80), (0, 140, 255), cv2.FILLED)  # Orange tag
-                cv2.putText(frame, "📸 Snapshot Saved to File!", (20, 71), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.putText(frame, " Snapshot Saved to File!", (20, 71), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
             # Bottom timestamp overlay
             cv2.putText(
