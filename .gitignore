@@ -1,0 +1,19 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local detection logs and snapshot captures
+detections/
+
+# Environment files & IDE settings
+.env
+.venv
+env/
+venv/
+.vscode/
+.idea/
+
+# OS metadata
+.DS_Store
+Thumbs.db
