@@ -133,7 +133,7 @@ def main():
                     cv2.imwrite(snapshot_path, frame)
                     last_snapshot_time = current_time
                     snapshot_saved_notice_until = current_time + 1.5  # Show notice on UI for 1.5s
-                    print(f"[SUCCESS] 📸 Saved detection snapshot: '{snapshot_path}'")
+                    print(f"[SUCCESS]  Saved detection snapshot: '{snapshot_path}'")
 
             # UI Overlay Status Banner
             if gun_count > 0:
