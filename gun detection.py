@@ -1,10 +1,11 @@
 import cv2
-import imutils
 import datetime
 import os
 import sys
 import argparse
 import time
+import math
+from ultralytics import YOLO
 
 # Sound alert support on Windows
 try:
@@ -16,42 +17,63 @@ except ImportError:
 def play_alert_sound():
     if HAS_WINSOUND:
         try:
-            # Play a 1500Hz beep for 250ms asynchronously
-            winsound.Beep(1500, 250)
-        except Exception:
-            pass
+            # Play the configured Windows warning sound, then a short audible
+            # tone so alerts still have an audible signal if the system alias is silent.
+            winsound.PlaySound(
+                "SystemExclamation",
+                winsound.SND_ALIAS | winsound.SND_ASYNC
+            )
+            winsound.Beep(1500, 350)
+        except RuntimeError as error:
+            print(f"[WARNING] Could not play alert sound: {error}")
+    else:
+        print("[WARNING] Sound alerts are unavailable because winsound is not supported on this platform.")
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Real-time Gun Detection with Snapshot Logging & Alerts")
-    parser.add_argument("-c", "--cascade", type=str, default="cascade.xml", help="Path to gun cascade XML file")
+    parser = argparse.ArgumentParser(description="Real-time gun-only detection with snapshot logging and alerts")
+    parser.add_argument("-m", "--model", type=str, default=None, help="Path to a YOLO gun detection model (defaults to gun_detector.pt beside this script)")
     parser.add_argument("-v", "--video", type=str, default=None, help="Path to video file (defaults to webcam)")
     parser.add_argument("-o", "--output", type=str, default="detections", help="Directory to save detected gun snapshots")
     parser.add_argument("--cooldown", type=float, default=2.0, help="Minimum seconds between snapshot recordings")
+    parser.add_argument("--confidence", type=float, default=0.6, help="Minimum gun confidence from 0 to 1")
     parser.add_argument("--no-sound", action="store_true", help="Disable audio alarm beep")
     args = parser.parse_args()
+
+    if not math.isfinite(args.cooldown) or args.cooldown < 0:
+        parser.error("--cooldown must be a finite, non-negative number")
+    if not math.isfinite(args.confidence) or not 0 <= args.confidence <= 1:
+        parser.error("--confidence must be between 0 and 1")
 
     # Create output directory for detections if it doesn't exist
     output_dir = args.output
     os.makedirs(output_dir, exist_ok=True)
     print(f"[INFO] Detection snapshots will be saved to: '{output_dir}'")
 
-    # Determine cascade XML path
-    cascade_path = args.cascade
-    if not os.path.exists(cascade_path):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        cascade_path = os.path.join(script_dir, "cascade.xml")
-        
-    if not os.path.exists(cascade_path):
-        print(f"[ERROR] Cascade file not found at '{args.cascade}' or '{cascade_path}'")
+    # Load a gun-specific YOLO model. The included model also has a knife class,
+    # so only its class explicitly named "gun" is allowed through.
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = args.model or os.path.join(script_dir, "gun_detector.pt")
+    if not os.path.exists(model_path):
+        print(f"[ERROR] YOLO model file not found: '{model_path}'")
         sys.exit(1)
 
-    # Load Haar cascade
-    gun_cascade = cv2.CascadeClassifier(cascade_path)
-    if gun_cascade.empty():
-        print(f"[ERROR] Failed to load cascade classifier from {cascade_path}")
+    try:
+        gun_model = YOLO(model_path)
+    except Exception as error:
+        print(f"[ERROR] Failed to load YOLO model from '{model_path}': {error}")
         sys.exit(1)
 
-    print(f"[INFO] Successfully loaded cascade model from: {cascade_path}")
+    gun_class_ids = [
+        int(class_id)
+        for class_id, class_name in gun_model.names.items()
+        if str(class_name).strip().lower() in {"gun", "firearm"}
+    ]
+    if not gun_class_ids:
+        print(f"[ERROR] Model has no class named 'gun' or 'firearm'. Available classes: {gun_model.names}")
+        sys.exit(1)
+    print(f"[INFO] Loaded gun model from: {model_path}")
+    print(f"[INFO] Detecting only class(es): {[gun_model.names[class_id] for class_id in gun_class_ids]}")
 
     # Initialize video capture source (webcam or video file)
     if args.video:
@@ -66,11 +88,13 @@ def main():
 
     if not camera.isOpened():
         print("[ERROR] Could not open video source.")
+        camera.release()
         sys.exit(1)
 
     print("[INFO] Press 'q' or 'ESC' in the feed window to exit.")
 
     last_snapshot_time = 0
+    last_sound_time = 0
     snapshot_saved_notice_until = 0
 
     try:
@@ -80,24 +104,30 @@ def main():
                 print("[INFO] Video stream ended or frame unavailable.")
                 break
 
-            # Resize frame for faster processing
-            frame = imutils.resize(frame, width=650)
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-            # Detect guns in grayscale frame
-            guns = gun_cascade.detectMultiScale(
-                gray,
-                scaleFactor=1.3,
-                minNeighbors=5,
-                minSize=(100, 100)
-            )
+            # Resize frame for faster processing while preserving its aspect ratio.
+            frame_height, frame_width = frame.shape[:2]
+            resized_height = round(frame_height * 650 / frame_width)
+            interpolation = cv2.INTER_AREA if frame_width > 650 else cv2.INTER_LINEAR
+            frame = cv2.resize(frame, (650, resized_height), interpolation=interpolation)
+            # Ask YOLO for gun classes only; non-gun classes cannot trigger alerts.
+            result = gun_model.predict(
+                frame,
+                conf=args.confidence,
+                classes=gun_class_ids,
+                verbose=False
+            )[0]
+            guns = []
+            if result.boxes is not None:
+                for box in result.boxes.xyxy.cpu().tolist():
+                    x1, y1, x2, y2 = (int(value) for value in box)
+                    guns.append((x1, y1, x2 - x1, y2 - y1))
 
             gun_count = len(guns)
             current_time = time.time()
             now_dt = datetime.datetime.now()
             timestamp_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-            # Draw bounding boxes around detected guns
+            # Draw bounding boxes around accepted gun detections.
             for (x, y, w, h) in guns:
                 # Draw red bounding box
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
@@ -118,9 +148,10 @@ def main():
                 # Console Alert Message with timestamp and gun count
                 print(f"[ALERT]  {timestamp_str} | THREAT DETECTED: {gun_count} Gun(s) Spotted in feed!")
 
-                # Play Audio Alarm if enabled
-                if not args.no_sound:
+                # Avoid blocking or playing a sound on every video frame.
+                if not args.no_sound and current_time - last_sound_time >= 1.0:
                     play_alert_sound()
+                    last_sound_time = current_time
 
                 # Check snapshot cooldown interval
                 if (current_time - last_snapshot_time) >= args.cooldown:
@@ -130,10 +161,12 @@ def main():
                     snapshot_path = os.path.join(output_dir, snapshot_filename)
 
                     # Save image snapshot to file
-                    cv2.imwrite(snapshot_path, frame)
+                    if cv2.imwrite(snapshot_path, frame):
+                        snapshot_saved_notice_until = current_time + 1.5
+                        print(f"[SUCCESS]  Saved detection snapshot: '{snapshot_path}'")
+                    else:
+                        print(f"[ERROR] Could not save detection snapshot: '{snapshot_path}'")
                     last_snapshot_time = current_time
-                    snapshot_saved_notice_until = current_time + 1.5  # Show notice on UI for 1.5s
-                    print(f"[SUCCESS]  Saved detection snapshot: '{snapshot_path}'")
 
             # UI Overlay Status Banner
             if gun_count > 0:
